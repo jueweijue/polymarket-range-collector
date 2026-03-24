@@ -30,7 +30,7 @@
   - YES 价格
   - NO 价格
 - 对有成交记录的场次输出一个独立 Excel
-- 若某个场次 `trades=0`，则直接跳过，不生成空 Excel
+- 若某个场次 `trades=0`，则直接跳过：不写 `data/trades/<slug>.json`，也不生成空 Excel
 - 输出完整性标记：`COMPLETE` / `BEST_EFFORT`
 
 ---

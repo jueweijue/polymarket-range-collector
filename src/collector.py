@@ -563,6 +563,10 @@ def collect_historical(project_dir: Path, config: dict):
 
         log(f"[history] [{idx}/{total}] fetch trades for {resolved.slug}")
         trades, diagnostics = fetch_market_trades(resolved.condition_id, filter_amount=float(config.get('polymarket', {}).get('filter_amount', 0)))
+        if not trades:
+            log(f"[history] [{idx}/{total}] {resolved.slug}: trades=0, skip cache write")
+            time.sleep(between_markets_sleep)
+            continue
         save_market_trades(project_dir, resolved, trades, diagnostics)
         log(f"[history] [{idx}/{total}] {resolved.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
         time.sleep(between_markets_sleep)
@@ -574,6 +578,10 @@ def export_excels(project_dir: Path, config: dict):
     overall_end = max(m.end_ts for m in markets)
     btc_prices = parse_binance_prices(project_dir, overall_start, overall_end)
     for market in markets:
+        cache_path = trade_cache_path(project_dir, market.slug)
+        if not cache_path.exists() or cache_path.stat().st_size == 0:
+            log(f"[export] skip {market.slug}: no cached trades json")
+            continue
         payload = load_market_trades(project_dir, market.slug)
         diagnostics = payload['diagnostics']
         trades = payload['trades']
