@@ -46,6 +46,10 @@ class MarketInfo:
     title: str
 
 
+def log(msg: str):
+    print(msg, flush=True)
+
+
 def fetch_json(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -73,6 +77,10 @@ def ts_to_iso(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).isoformat()
 
 
+def ts_to_api_time(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
 def ts_to_bjt_text(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=BJT).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -90,26 +98,70 @@ def market_slug_for_ts(start_ts: int) -> str:
 
 
 def resolve_markets(start_ts: int, end_ts: int) -> List[MarketInfo]:
-    markets = []
-    current = (start_ts // 300) * 300
-    while current < end_ts:
-        slug = market_slug_for_ts(current)
-        url = f"{GAMMA_API}/events?slug={slug}"
-        data = fetch_json(url)
-        if data:
-            event = data[0]
-            market = event["markets"][0]
-            token_ids = json.loads(market["clobTokenIds"])
-            markets.append(MarketInfo(
-                slug=slug,
-                start_ts=current,
-                end_ts=current + 300,
-                condition_id=market["conditionId"],
-                yes_token_id=token_ids[0],
-                no_token_id=token_ids[1],
-                title=event["title"],
-            ))
-        current += 300
+    """Resolve BTC Up/Down 5m markets in bulk.
+
+    Old behavior queried one slug per 5-minute slot, which becomes painfully slow
+    for month-scale ranges. New behavior pages Gamma `/markets` by day-range and
+    filters locally for `btc-updown-5m-`.
+    """
+    all_markets: Dict[str, MarketInfo] = {}
+    day_start_ts = start_ts
+    one_day = 86400
+    day_index = 0
+    total_days = max(1, (end_ts - start_ts + one_day - 1) // one_day)
+
+    while day_start_ts < end_ts:
+        day_end_ts = min(day_start_ts + one_day, end_ts)
+        offset = 0
+        limit = 500
+        matched_this_day = 0
+        log(f"[prepare] resolving day {day_index + 1}/{total_days}: {ts_to_iso(day_start_ts)} -> {ts_to_iso(day_end_ts)}")
+
+        while True:
+            url = (
+                f"{GAMMA_API}/markets?limit={limit}&offset={offset}"
+                f"&start_date_min={ts_to_api_time(day_start_ts)}&start_date_max={ts_to_api_time(day_end_ts)}"
+            )
+            data = fetch_json(url)
+            if not data:
+                break
+
+            for market in data:
+                slug = market.get("slug", "")
+                if not slug.startswith("btc-updown-5m-"):
+                    continue
+                try:
+                    start_raw = market.get("startDate") or market.get("start_date")
+                    market_start_ts = int(datetime.fromisoformat(start_raw.replace("Z", "+00:00")).timestamp())
+                    if not (start_ts <= market_start_ts < end_ts):
+                        continue
+                    token_ids = json.loads(market["clobTokenIds"])
+                    info = MarketInfo(
+                        slug=slug,
+                        start_ts=market_start_ts,
+                        end_ts=market_start_ts + 300,
+                        condition_id=market["conditionId"],
+                        yes_token_id=token_ids[0],
+                        no_token_id=token_ids[1],
+                        title=market.get("question") or market.get("title") or slug,
+                    )
+                    if slug not in all_markets:
+                        all_markets[slug] = info
+                        matched_this_day += 1
+                except Exception:
+                    continue
+
+            log(f"[prepare]   offset={offset} fetched={len(data)} matched_total={matched_this_day}")
+            if len(data) < limit:
+                break
+            offset += limit
+            time.sleep(0.1)
+
+        day_start_ts = day_end_ts
+        day_index += 1
+
+    markets = sorted(all_markets.values(), key=lambda m: m.start_ts)
+    log(f"[prepare] resolved total btc-updown markets: {len(markets)}")
     return markets
 
 
@@ -138,17 +190,17 @@ def download_binance_data(project_dir: Path, start_ts: int, end_ts: int):
         filename = binance_zip_name(day)
         target = target_dir / filename
         if target.exists() and target.stat().st_size > 0:
-            print(f"[binance] exists: {filename}")
+            log(f"[binance] exists: {filename}")
             continue
         url = f"{BINANCE_BASE}/{filename}"
-        print(f"[binance] download: {url}")
+        log(f"[binance] download: {url}")
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 target.write_bytes(resp.read())
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                print(f"[binance] pending: {filename} not published yet, skip for now")
+                log(f"[binance] pending: {filename} not published yet, skip for now")
                 missing.append(filename)
                 continue
             raise
@@ -227,7 +279,7 @@ def fetch_trades_for_side(condition_id: str, side: str, filter_amount: float = 0
         try:
             data = fetch_trades_page(condition_id, side=side, filter_amount=filter_amount, offset=offset, limit=limit)
         except Exception as e:
-            print(f"[trades] warning side={side} filter={filter_amount} offset={offset}: {e}")
+            log(f"[trades] warning side={side} filter={filter_amount} offset={offset}: {e}")
             truncated = True
             break
         if not data:
@@ -425,18 +477,18 @@ def prepare(project_dir: Path, config: dict):
         raise RuntimeError('No BTC Up/Down markets resolved for configured range')
     save_markets(project_dir, markets)
     missing = download_binance_data(project_dir, start_ts, end_ts)
-    print(f"[prepare] markets={len(markets)} saved to data/markets.json")
+    log(f"[prepare] markets={len(markets)} saved to data/markets.json")
     if missing:
-        print(f"[prepare] binance pending files: {', '.join(missing)}")
+        log(f"[prepare] binance pending files: {', '.join(missing)}")
 
 
 def collect_historical(project_dir: Path, config: dict):
     markets = load_markets(project_dir)
     for market in markets:
-        print(f"[history] fetch trades for {market.slug}")
+        log(f"[history] fetch trades for {market.slug}")
         trades, diagnostics = fetch_market_trades(market.condition_id, filter_amount=float(config.get('polymarket', {}).get('filter_amount', 0)))
         save_market_trades(project_dir, market, trades, diagnostics)
-        print(f"[history] {market.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
+        log(f"[history] {market.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
 
 
 def export_excels(project_dir: Path, config: dict):
@@ -450,7 +502,7 @@ def export_excels(project_dir: Path, config: dict):
         trades = payload['trades']
         timeline = build_trade_timeline(trades, market.start_ts, market.end_ts)
         out = write_market_excel(project_dir, market, diagnostics, btc_prices, timeline)
-        print(f"[export] wrote {out}")
+        log(f"[export] wrote {out}")
 
 
 def main():

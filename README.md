@@ -168,6 +168,13 @@ python3 run.py <action>
 
 #### 1) 预处理
 
+`prepare` 现在针对**大时间范围（例如整月）**做了优化：
+- 按天批量请求 Gamma `/markets`
+- 本地筛选 `btc-updown-5m-*`
+- 日志里会持续输出 day / offset / matched 进度
+
+所以按月跑时，看到 `prepare` 连续打印进度是正常的，不会再像之前那样长时间看起来没动静。
+
 ```bash
 python3 run.py prepare
 ```
