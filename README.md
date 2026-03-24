@@ -22,9 +22,9 @@
 项目目前支持：
 
 - 按北京时间设置起止时间段
-- 自动解析这段时间内所有 BTC Up/Down 5m 场次
+- 按时间戳每 5 分钟直接生成这段时间内所有 BTC Up/Down 5m 场次 slug
 - 自动下载 Binance 公共历史数据（`BTCUSDT aggTrades` 日线 zip）
-- 自动拉取每个场次的 Polymarket 历史 trades
+- 自动拉取每个场次的 Polymarket 历史 trades（按 slug 懒加载 market metadata）
 - 按秒重建每个场次 5 分钟窗口内的：
   - BTC 价格
   - YES 价格
@@ -144,6 +144,11 @@ cp config/config.example.json config/config.json
 - 默认 `0` 表示尽量全量抓取
 - 如果你只关心较大成交，可以设更高值，但会损失小单信息
 
+#### `polymarket.sleep_between_markets_seconds`（可选）
+- 每个场次抓完后额外休眠的秒数
+- 默认是偏保守的慢速设置
+- 适合后台长时间跑，优先降低 429 限流概率
+
 ---
 
 ## 使用方式
@@ -169,12 +174,13 @@ python3 run.py <action>
 
 #### 1) 预处理
 
-`prepare` 现在针对**大时间范围（例如整月）**做了优化：
-- 按天批量请求 Gamma `/markets`
-- 本地筛选 `btc-updown-5m-*`
-- 日志里会持续输出 day / offset / matched 进度
+`prepare` 现在走**时间戳直接枚举**：
+- 按配置时间段每 5 分钟步进一次
+- 直接生成 `btc-updown-5m-<timestamp>` slug
+- 不在 `prepare` 阶段确认市场是否存在
+- 日志里会持续输出已生成 slug 的进度
 
-所以按月跑时，看到 `prepare` 连续打印进度是正常的，不会再像之前那样长时间看起来没动静。
+这样对你按月回补更确定：时间段里该有哪些候选场次，就先全列出来，后续在 `history` 阶段再按 slug 懒加载市场 metadata。
 
 ```bash
 python3 run.py prepare
@@ -182,7 +188,7 @@ python3 run.py prepare
 
 做两件事：
 
-1. 解析配置时间段内有哪些 BTC Up/Down 5m 场次
+1. 按时间戳每 5 分钟生成配置时间段内的 BTC Up/Down 5m 场次 slug 列表
 2. 下载对应日期的 Binance `BTCUSDT-aggTrades-YYYY-MM-DD.zip`
 
 输出结果：
@@ -198,7 +204,7 @@ python3 run.py prepare
 - **prepare 缓存**：
   - 如果 `data/prepare_meta.json` 里的时间范围与当前配置一致
   - 且 `data/markets.json` 存在
-  - 就直接复用已有场次列表，不再重新解析 Gamma 市场
+  - 就直接复用已有 slug 列表，不再重新生成
 
 - **Binance 缓存**：
   - `data/binance/*.zip` 已存在就不会重复下载
@@ -351,6 +357,8 @@ Polymarket Data API 在高成交场次下可能存在分页截断风险。
 - 按 `BUY` / `SELL` 分片抓取
 - 自动翻页
 - 对疑似截断场次做 recovery ladder 补捞
+- 对 `429 Too Many Requests` 自动指数退避重试
+- 对 Data API 请求做全局节流，降低被限流概率
 - 输出完整性状态：
   - `COMPLETE`
   - `BEST_EFFORT`
