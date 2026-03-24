@@ -64,6 +64,9 @@
 
 ## 目录结构
 
+> 说明：`data/`、`output/` 里的运行时文件和子目录会在程序首次运行时自动创建，不需要手动 mkdir。
+
+
 ```text
 polymarket-range-collector/
 ├── .gitignore

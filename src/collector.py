@@ -115,11 +115,14 @@ def resolve_markets(start_ts: int, end_ts: int) -> List[MarketInfo]:
 
 def save_markets(project_dir: Path, markets: List[MarketInfo]):
     out = project_dir / "data" / "markets.json"
+    ensure_dir(out.parent)
     out.write_text(json.dumps([asdict(m) for m in markets], ensure_ascii=False, indent=2))
 
 
 def load_markets(project_dir: Path) -> List[MarketInfo]:
     path = project_dir / "data" / "markets.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing {path}. Run prepare first.")
     return [MarketInfo(**m) for m in json.loads(path.read_text())]
 
 
