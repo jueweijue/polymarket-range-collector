@@ -4,6 +4,7 @@
     "end_bjt": "2026-03-18 00:00:00"
   },
   "polymarket": {
-    "filter_amount": 0
+    "filter_amount": 0,
+    "sleep_between_markets_seconds": 2
   }
 }
