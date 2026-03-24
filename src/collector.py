@@ -577,6 +577,9 @@ def export_excels(project_dir: Path, config: dict):
         payload = load_market_trades(project_dir, market.slug)
         diagnostics = payload['diagnostics']
         trades = payload['trades']
+        if not trades:
+            log(f"[export] skip {market.slug}: trades=0, no excel generated")
+            continue
         timeline = build_trade_timeline(trades, market.start_ts, market.end_ts)
         out = write_market_excel(project_dir, market, diagnostics, btc_prices, timeline)
         log(f"[export] wrote {out}")
