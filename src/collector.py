@@ -171,6 +171,19 @@ def save_markets(project_dir: Path, markets: List[MarketInfo]):
     out.write_text(json.dumps([asdict(m) for m in markets], ensure_ascii=False, indent=2))
 
 
+def save_prepare_meta(project_dir: Path, meta: dict):
+    path = project_dir / "data" / "prepare_meta.json"
+    ensure_dir(path.parent)
+    path.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+
+
+def load_prepare_meta(project_dir: Path):
+    path = project_dir / "data" / "prepare_meta.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 def load_markets(project_dir: Path) -> List[MarketInfo]:
     path = project_dir / "data" / "markets.json"
     if not path.exists():
@@ -327,6 +340,10 @@ def fetch_market_trades(condition_id: str, filter_amount: float = 0):
     return unique, diagnostics
 
 
+def trade_cache_path(project_dir: Path, slug: str) -> Path:
+    return project_dir / "data" / "trades" / f"{slug}.json"
+
+
 def save_market_trades(project_dir: Path, market: MarketInfo, trades: List[dict], diagnostics: dict):
     out_dir = project_dir / "data" / "trades"
     ensure_dir(out_dir)
@@ -335,12 +352,12 @@ def save_market_trades(project_dir: Path, market: MarketInfo, trades: List[dict]
         "diagnostics": diagnostics,
         "trades": sorted(trades, key=lambda t: int(t["timestamp"]))
     }
-    out_path = out_dir / f"{market.slug}.json"
+    out_path = trade_cache_path(project_dir, market.slug)
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def load_market_trades(project_dir: Path, slug: str):
-    path = project_dir / "data" / "trades" / f"{slug}.json"
+    path = trade_cache_path(project_dir, slug)
     return json.loads(path.read_text())
 
 
@@ -472,23 +489,50 @@ def write_market_excel(project_dir: Path, market: MarketInfo, diagnostics: dict,
 def prepare(project_dir: Path, config: dict):
     start_ts = bjt_to_utc_ts(config['range']['start_bjt'])
     end_ts = bjt_to_utc_ts(config['range']['end_bjt'])
-    markets = resolve_markets(start_ts, end_ts)
-    if not markets:
-        raise RuntimeError('No BTC Up/Down markets resolved for configured range')
-    save_markets(project_dir, markets)
+
+    cached_meta = load_prepare_meta(project_dir)
+    reuse_prepare = False
+    if cached_meta:
+        same_range = cached_meta.get('start_ts') == start_ts and cached_meta.get('end_ts') == end_ts
+        markets_path = project_dir / 'data' / 'markets.json'
+        if same_range and markets_path.exists():
+            reuse_prepare = True
+            log(f"[prepare] reusing cached market list for range {config['range']['start_bjt']} -> {config['range']['end_bjt']}")
+
+    if reuse_prepare:
+        markets = load_markets(project_dir)
+    else:
+        markets = resolve_markets(start_ts, end_ts)
+        if not markets:
+            raise RuntimeError('No BTC Up/Down markets resolved for configured range')
+        save_markets(project_dir, markets)
+        save_prepare_meta(project_dir, {
+            'start_ts': start_ts,
+            'end_ts': end_ts,
+            'start_bjt': config['range']['start_bjt'],
+            'end_bjt': config['range']['end_bjt'],
+            'market_count': len(markets),
+            'prepared_at': datetime.now(tz=UTC).isoformat(),
+        })
+        log(f"[prepare] markets={len(markets)} saved to data/markets.json")
+
     missing = download_binance_data(project_dir, start_ts, end_ts)
-    log(f"[prepare] markets={len(markets)} saved to data/markets.json")
     if missing:
         log(f"[prepare] binance pending files: {', '.join(missing)}")
 
 
 def collect_historical(project_dir: Path, config: dict):
     markets = load_markets(project_dir)
-    for market in markets:
-        log(f"[history] fetch trades for {market.slug}")
+    total = len(markets)
+    for idx, market in enumerate(markets, start=1):
+        cache_path = trade_cache_path(project_dir, market.slug)
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            log(f"[history] [{idx}/{total}] skip cached {market.slug}")
+            continue
+        log(f"[history] [{idx}/{total}] fetch trades for {market.slug}")
         trades, diagnostics = fetch_market_trades(market.condition_id, filter_amount=float(config.get('polymarket', {}).get('filter_amount', 0)))
         save_market_trades(project_dir, market, trades, diagnostics)
-        log(f"[history] {market.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
+        log(f"[history] [{idx}/{total}] {market.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
 
 
 def export_excels(project_dir: Path, config: dict):

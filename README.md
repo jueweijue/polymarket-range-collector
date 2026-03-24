@@ -81,7 +81,8 @@ polymarket-range-collector/
 ├── data/
 │   ├── binance/        # 下载的 Binance zip
 │   ├── trades/         # 每个场次的历史 trades JSON
-│   └── markets.json    # 当前配置范围解析出的场次清单
+│   ├── markets.json    # 当前配置范围解析出的场次清单
+│   └── prepare_meta.json  # prepare 缓存元信息
 └── output/
     └── *.xlsx          # 每个场次单独 Excel
 ```
@@ -189,6 +190,25 @@ python3 run.py prepare
 - `data/binance/*.zip`
 
 如果某一天的 Binance 日线 zip 还没发布，程序会提示 `pending`，不会中断。
+
+### 缓存/复用逻辑
+
+为了适合多次重跑、断点续跑，项目现在会自动复用已有数据：
+
+- **prepare 缓存**：
+  - 如果 `data/prepare_meta.json` 里的时间范围与当前配置一致
+  - 且 `data/markets.json` 存在
+  - 就直接复用已有场次列表，不再重新解析 Gamma 市场
+
+- **Binance 缓存**：
+  - `data/binance/*.zip` 已存在就不会重复下载
+
+- **Polymarket trades 缓存**：
+  - `data/trades/<slug>.json` 已存在就跳过该场次，不再重复抓取
+
+这意味着：
+- 第一次跑最重
+- 后面重复跑同一个时间段时，会显著更快
 
 ---
 
