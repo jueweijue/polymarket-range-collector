@@ -42,10 +42,10 @@ class MarketInfo:
     slug: str
     start_ts: int
     end_ts: int
-    condition_id: str | None = None
-    yes_token_id: str | None = None
-    no_token_id: str | None = None
-    title: str | None = None
+    condition_id: str
+    yes_token_id: str
+    no_token_id: str
+    title: str
 
 
 def log(msg: str):
@@ -139,31 +139,67 @@ def market_slug_for_ts(start_ts: int) -> str:
 
 
 def resolve_markets(start_ts: int, end_ts: int) -> List[MarketInfo]:
-    """Generate market slugs directly from timestamps.
+    """Resolve BTC Up/Down 5m markets by querying Gamma API.
 
-    User explicitly wants prepare to trust the timestamp pattern and avoid
-    market-existence confirmation at this stage.
+    Pages Gamma /markets by day-range and filters locally for btc-updown-5m-.
     """
-    markets: List[MarketInfo] = []
-    current = (start_ts // 300) * 300
-    total = max(0, (end_ts - current + 299) // 300)
-    idx = 0
+    all_markets: Dict[str, MarketInfo] = {}
+    day_start_ts = start_ts
+    one_day = 86400
+    day_index = 0
+    total_days = max(1, (end_ts - start_ts + one_day - 1) // one_day)
 
-    while current < end_ts:
-        idx += 1
-        if idx == 1 or idx % 100 == 0:
-            log(f"[prepare] generated {idx}/{total} inferred market slugs")
-        markets.append(MarketInfo(
-            slug=market_slug_for_ts(current),
-            start_ts=current,
-            end_ts=current + 300,
-            condition_id=None,
-            yes_token_id=None,
-            no_token_id=None,
-            title=None,
-        ))
-        current += 300
+    while day_start_ts < end_ts:
+        day_end_ts = min(day_start_ts + one_day, end_ts)
+        offset = 0
+        limit = 500
+        matched_this_day = 0
+        log(f"[prepare] resolving day {day_index + 1}/{total_days}: {ts_to_iso(day_start_ts)} -> {ts_to_iso(day_end_ts)}")
 
+        while True:
+            url = (
+                f"{GAMMA_API}/markets?limit={limit}&offset={offset}"
+                f"&start_date_min={ts_to_api_time(day_start_ts)}&start_date_max={ts_to_api_time(day_end_ts)}"
+            )
+            data = fetch_json(url)
+            if not data:
+                break
+
+            for market in data:
+                slug = market.get("slug", "")
+                if not slug.startswith("btc-updown-5m-"):
+                    continue
+                try:
+                    start_raw = market.get("startDate") or market.get("start_date")
+                    market_start_ts = int(datetime.fromisoformat(start_raw.replace("Z", "+00:00")).timestamp())
+                    if not (start_ts <= market_start_ts < end_ts):
+                        continue
+                    token_ids = json.loads(market["clobTokenIds"])
+                    info = MarketInfo(
+                        slug=slug,
+                        start_ts=market_start_ts,
+                        end_ts=market_start_ts + 300,
+                        condition_id=market["conditionId"],
+                        yes_token_id=token_ids[0],
+                        no_token_id=token_ids[1],
+                        title=market.get("question") or market.get("title") or slug,
+                    )
+                    if slug not in all_markets:
+                        all_markets[slug] = info
+                        matched_this_day += 1
+                except Exception:
+                    continue
+
+            log(f"[prepare]   offset={offset} fetched={len(data)} matched_total={matched_this_day}")
+            if len(data) < limit:
+                break
+            offset += limit
+            time.sleep(0.1)
+
+        day_start_ts = day_end_ts
+        day_index += 1
+
+    markets = sorted(all_markets.values(), key=lambda m: m.start_ts)
     log(f"[prepare] resolved total btc-updown markets: {len(markets)}")
     return markets
 
@@ -347,25 +383,6 @@ def fetch_market_trades(condition_id: str, filter_amount: float = 0):
 
 def trade_cache_path(project_dir: Path, slug: str) -> Path:
     return project_dir / "data" / "trades" / f"{slug}.json"
-
-
-def resolve_market_metadata(slug: str, start_ts: int, end_ts: int) -> MarketInfo | None:
-    url = f"{GAMMA_API}/events?slug={slug}"
-    data = fetch_json(url)
-    if not data:
-        return None
-    event = data[0]
-    market = event["markets"][0]
-    token_ids = json.loads(market["clobTokenIds"])
-    return MarketInfo(
-        slug=slug,
-        start_ts=start_ts,
-        end_ts=end_ts,
-        condition_id=market["conditionId"],
-        yes_token_id=token_ids[0],
-        no_token_id=token_ids[1],
-        title=event.get("title") or market.get("question") or slug,
-    )
 
 
 def save_market_trades(project_dir: Path, market: MarketInfo, trades: List[dict], diagnostics: dict):
@@ -556,19 +573,14 @@ def collect_historical(project_dir: Path, config: dict):
             log(f"[history] [{idx}/{total}] skip cached {market.slug}")
             continue
 
-        resolved = resolve_market_metadata(market.slug, market.start_ts, market.end_ts)
-        if not resolved:
-            log(f"[history] [{idx}/{total}] missing market for slug {market.slug}, skip")
-            continue
-
-        log(f"[history] [{idx}/{total}] fetch trades for {resolved.slug}")
-        trades, diagnostics = fetch_market_trades(resolved.condition_id, filter_amount=float(config.get('polymarket', {}).get('filter_amount', 0)))
+        log(f"[history] [{idx}/{total}] fetch trades for {market.slug}")
+        trades, diagnostics = fetch_market_trades(market.condition_id, filter_amount=float(config.get('polymarket', {}).get('filter_amount', 0)))
         if not trades:
-            log(f"[history] [{idx}/{total}] {resolved.slug}: trades=0, skip cache write")
+            log(f"[history] [{idx}/{total}] {market.slug}: trades=0, skip cache write")
             time.sleep(between_markets_sleep)
             continue
-        save_market_trades(project_dir, resolved, trades, diagnostics)
-        log(f"[history] [{idx}/{total}] {resolved.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
+        save_market_trades(project_dir, market, trades, diagnostics)
+        log(f"[history] [{idx}/{total}] {market.slug}: trades={len(trades)} completeness={'ok' if diagnostics.get('complete') else 'best-effort'}")
         time.sleep(between_markets_sleep)
 
 

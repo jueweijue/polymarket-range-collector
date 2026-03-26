@@ -22,9 +22,9 @@
 项目目前支持：
 
 - 按北京时间设置起止时间段
-- 按时间戳每 5 分钟直接生成这段时间内所有 BTC Up/Down 5m 场次 slug
+- 通过 Gamma API 按日期范围查询这段时间内所有 BTC Up/Down 5m 场次（含完整 metadata）
 - 自动下载 Binance 公共历史数据（`BTCUSDT aggTrades` 日线 zip）
-- 自动拉取每个场次的 Polymarket 历史 trades（按 slug 懒加载 market metadata）
+- 自动拉取每个场次的 Polymarket 历史 trades
 - 按秒重建每个场次 5 分钟窗口内的：
   - BTC 价格
   - YES 价格
@@ -175,13 +175,11 @@ python3 run.py <action>
 
 #### 1) 预处理
 
-`prepare` 现在走**时间戳直接枚举**：
-- 按配置时间段每 5 分钟步进一次
-- 直接生成 `btc-updown-5m-<timestamp>` slug
-- 不在 `prepare` 阶段确认市场是否存在
-- 日志里会持续输出已生成 slug 的进度
-
-这样对你按月回补更确定：时间段里该有哪些候选场次，就先全列出来，后续在 `history` 阶段再按 slug 懒加载市场 metadata。
+`prepare` 通过 **Gamma API 查询**确定市场：
+- 按日期范围分页查询 Gamma `/markets` 接口
+- 过滤 `btc-updown-5m-` 前缀的市场
+- 提取完整 metadata（condition_id、token_ids、title 等）
+- 日志会按天输出查询进度
 
 ```bash
 python3 run.py prepare
@@ -189,7 +187,7 @@ python3 run.py prepare
 
 做两件事：
 
-1. 按时间戳每 5 分钟生成配置时间段内的 BTC Up/Down 5m 场次 slug 列表
+1. 查询 Gamma API 获取配置时间段内的 BTC Up/Down 5m 场次列表（含完整 metadata）
 2. 下载对应日期的 Binance `BTCUSDT-aggTrades-YYYY-MM-DD.zip`
 
 输出结果：
@@ -205,7 +203,7 @@ python3 run.py prepare
 - **prepare 缓存**：
   - 如果 `data/prepare_meta.json` 里的时间范围与当前配置一致
   - 且 `data/markets.json` 存在
-  - 就直接复用已有 slug 列表，不再重新生成
+  - 就直接复用已有市场列表，不再重新查询 Gamma API
 
 - **Binance 缓存**：
   - `data/binance/*.zip` 已存在就不会重复下载
